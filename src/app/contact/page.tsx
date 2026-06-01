@@ -1,6 +1,6 @@
 import React from "react";
 import { Metadata } from "next";
-import { getContactPage } from "@/lib/graphql";
+import { getContactPage, getFormSettings } from "@/lib/graphql";
 import * as cheerio from "cheerio";
 import Image from "next/image";
 import Header from "@/components/Header";
@@ -23,6 +23,9 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default async function ContactPage() {
   const pageData = await getContactPage();
+  const formSettings = await getFormSettings();
+  const formFields = formSettings?.fields || [];
+  const formTitle = formSettings?.form_title || "";
 
   if (!pageData) {
     return (
@@ -89,7 +92,11 @@ export default async function ContactPage() {
               </div>
             ))}
 
-            <ContactForm formHtml={fluentFormHtml} />
+            <ContactForm 
+              formHtml={fluentFormHtml} 
+              fields={formFields} 
+              title={formTitle} 
+            />
 
           </FadeIn>
         </div>

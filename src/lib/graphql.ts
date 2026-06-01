@@ -93,6 +93,25 @@ export async function getLawFirmPage() {
   return data?.pages?.nodes[0] || null;
 }
 
+export async function getFormSettings() {
+  try {
+    const endpoint = "https://silvioh22.sg-host.com/wp-json/firebase-form/v1/settings";
+    const res = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+      },
+      next: { revalidate: 1 },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data;
+  } catch (error) {
+    console.error("Error fetching form settings:", error);
+    return null;
+  }
+}
+
 export async function getTeamPage() {
   const data = await fetchGraphQL(`
     query {

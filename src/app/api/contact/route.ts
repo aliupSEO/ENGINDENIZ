@@ -1,14 +1,14 @@
 import { NextResponse } from "next/server";
 
-// Helper to send data to Google Firebase Firestore via REST API
-async function saveToFirestore(fields: Record<string, string>) {
+// Helper to send data to Google Firebase Firestore via REST API (Local Dev Offline Backup only)
+async function saveToFirestoreBackup(fields: Record<string, string>) {
   try {
     const projectId = process.env.FIREBASE_PROJECT_ID;
     const apiKey = process.env.FIREBASE_API_KEY;
     const collection = process.env.FIREBASE_COLLECTION || "submissions";
 
     if (!projectId || !apiKey) {
-      console.warn("Firebase configuration is missing in environment variables.");
+      console.warn("Firebase configuration is missing in environment variables. Local backup skipped.");
       return;
     }
 
@@ -37,134 +37,121 @@ async function saveToFirestore(fields: Record<string, string>) {
 
     if (!response.ok) {
       const errBody = await response.text();
-      console.error("Firestore URL:",
-      `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${collection}?key=${apiKey}`
-      );
-
-      console.error("Firestore Payload:", JSON.stringify({
-        fields: firestoreFields,
-      }, null, 2));
-
-      console.error("Firestore Error:", errBody);
+      console.error("Firestore Backup Error:", errBody);
     } else {
-      console.log("Form submission successfully saved to Firebase Firestore.");
+      console.log("Form submission successfully backed up to Firebase Firestore directly from Next.js.");
     }
   } catch (error) {
-    console.error("Error saving to Firestore:", error);
+    console.error("Error saving backup to Firestore:", error);
   }
 }
 
 export async function POST(request: Request) {
   try {
     const contentType = request.headers.get("content-type") || "";
-    
-    // Check if it's a Fluent Forms submission (x-www-form-urlencoded)
+    let submissionFields: Record<string, string> = {};
+
+    // 1. Extract values depending on Content-Type
     if (contentType.includes("application/x-www-form-urlencoded")) {
       const bodyText = await request.text();
+      const params = new URLSearchParams(bodyText);
+      const rawDataString = params.get("data") || "";
+      const rawData = new URLSearchParams(rawDataString);
 
-      // PARSE AND SAVE TO FIREBASE IMMEDIATELY (So it works on localhost even if WP rejects/blocks it)
-      let parsedFields: Record<string, string> = {};
-      try {
-        const params = new URLSearchParams(bodyText);
-        const rawDataString = params.get("data") || "";
-        const rawData = new URLSearchParams(rawDataString);
-
-        for (const [key, value] of rawData.entries()) {
-          // Ignore WordPress and Fluent Forms internal nonces / keys
-          if (
-            key.startsWith("_") ||
-            ["action", "form_id"].includes(key)
-          ) {
-            continue;
-          }
-
-          // Clean up bracketed keys, e.g. "names[names][first_name]" -> "first_name" or "name"
-          let cleanKey = key;
-          if (key.includes("[") && key.includes("]")) {
-            const matches = [...key.matchAll(/\[(.*?)\]/g)];
-            if (matches.length > 0) {
-              cleanKey = matches[matches.length - 1][1] || key;
-            }
-          }
-
-          // Map Fluent Forms default input names to beautiful descriptive keys
-          if (cleanKey === "input_text") cleanKey = "name";
-          if (cleanKey === "input_text_1") cleanKey = "address";
-          if (cleanKey === "input_text_2") cleanKey = "plz_ort";
-
-          // Normalize other German/camelCase names
-          if (cleanKey === "adresse") cleanKey = "address";
-          if (cleanKey === "plzOrt") cleanKey = "plz_ort";
-
-          parsedFields[cleanKey] = value;
+      for (const [key, value] of rawData.entries()) {
+        if (key.startsWith("_") || ["action", "form_id"].includes(key)) {
+          continue;
         }
 
-        // Trigger Firestore Sync immediately
-        await saveToFirestore(parsedFields);
-      } catch (firebaseErr) {
-        console.error("Failed to parse and save Fluent Form submission to Firebase:", firebaseErr);
+        let cleanKey = key;
+        if (key.includes("[") && key.includes("]")) {
+          const matches = [...key.matchAll(/\[(.*?)\]/g)];
+          if (matches.length > 0) {
+            cleanKey = matches[matches.length - 1][1] || key;
+          }
+        }
+
+        // Normalize default fluent form inputs or German keys
+        if (cleanKey === "input_text") cleanKey = "name";
+        if (cleanKey === "input_text_1") cleanKey = "address";
+        if (cleanKey === "input_text_2") cleanKey = "plz_ort";
+        if (cleanKey === "adresse") cleanKey = "address";
+        if (cleanKey === "plzOrt") cleanKey = "plz_ort";
+
+        submissionFields[cleanKey] = value;
       }
-      
-      const response = await fetch("https://silvioh22.sg-host.com/wp-admin/admin-ajax.php", {
+    } else {
+      // JSON format (our standalone next.js forms submit JSON)
+      const body = await request.json();
+      submissionFields = { ...body };
+
+      // Dynamic automatic detection of core fields for WordPress DB compatibility
+      if (!submissionFields.email) {
+        const emailKey = Object.keys(body).find(k => k.toLowerCase().includes("email") || k.toLowerCase().includes("mail"));
+        if (emailKey) submissionFields.email = body[emailKey];
+      }
+      if (!submissionFields.name) {
+        const nameKey = Object.keys(body).find(k => k.toLowerCase().includes("name"));
+        if (nameKey) submissionFields.name = body[nameKey];
+      }
+      if (!submissionFields.address) {
+        const addrKey = Object.keys(body).find(k => k.toLowerCase().includes("address") || k.toLowerCase().includes("adresse") || k.toLowerCase().includes("street"));
+        if (addrKey) submissionFields.address = body[addrKey];
+      }
+      if (!submissionFields.plz_ort) {
+        const plzKey = Object.keys(body).find(k => k.toLowerCase().includes("plz") || k.toLowerCase().includes("ort") || k.toLowerCase().includes("zip") || k.toLowerCase().includes("city"));
+        if (plzKey) submissionFields.plz_ort = body[plzKey];
+      }
+    }
+
+    console.log("Parsed submission fields:", submissionFields);
+
+    // 2. Post to Custom WordPress REST API Endpoint
+    let wpSuccess = false;
+    let wpErrorMsg = "";
+
+    try {
+      const wpResponse = await fetch("https://silvioh22.sg-host.com/wp-json/firebase-form/v1/submit", {
         method: "POST",
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Type": "application/json",
           "Accept": "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-          "Origin": "https://engin-deniz.com",
-          "Referer": "https://engin-deniz.com/contact",
         },
-        body: bodyText,
+        body: JSON.stringify(submissionFields),
       });
 
-      const data = await response.json();
+      const wpData = await wpResponse.json();
 
-      if (response.ok && (data.success || data.insert_id)) {
-        return NextResponse.json({ success: true, ...data });
+      if (wpResponse.ok && wpData.success) {
+        wpSuccess = true;
+        console.log("Successfully synced submission to WordPress Custom Table and Firebase via REST API!");
+        return NextResponse.json({ success: true, ...wpData });
       } else {
-        console.warn("WordPress Fluent Forms Sync failed or was rejected:", data);
-        // We still return success if Firebase succeeded during local testing
-        return NextResponse.json({ success: true, message: "Saved to Firebase successfully, but WordPress sync was bypassed/rejected." });
+        wpErrorMsg = wpData.message || "Failed WordPress REST API verification.";
+        console.warn("WordPress REST API rejected the submission:", wpData);
       }
+    } catch (wpErr: any) {
+      wpErrorMsg = wpErr.message || "WordPress server unreachable.";
+      console.error("Failed to connect to WordPress REST API:", wpErr);
     }
 
-    // Fallback for JSON requests (direct submits / fallback form)
-    const body = await request.json();
-    
-    // Map fallback keys to Firestore and save immediately
-    const submissionFields: Record<string, string> = {
-      name: body.Name || "",
-      address: body.Adresse || "",
-      plz_ort: body["PLZ / Ort"] || "",
-      email: body["E-Mail"] || "",
-    };
-
-    await saveToFirestore(submissionFields);
-    
-    // Send to WordPress / FormSubmit fallback
-    const response = await fetch("https://formsubmit.co/ajax/lawfirm@engin-deniz.com", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        Origin: "https://engin-deniz.com",
-        Referer: "https://engin-deniz.com/contact",
-      },
-      body: JSON.stringify(body),
-    });
-
-    const data = await response.json();
-
-    if (response.ok || data.success === "true" || data.message?.includes("Activation")) {
-      return NextResponse.json({ success: true, message: data.message });
-    } else {
-      console.warn("FormSubmit / WordPress fallback rejected, but saved to Firebase.");
-      return NextResponse.json({ success: true, message: "Saved to Firebase successfully, but external email fallback was bypassed." });
+    // 3. Fallback: If WordPress server is down or rejects (e.g. offline local development),
+    // save directly to Firebase Firestore from Next.js server-side as a secure fallback.
+    if (!wpSuccess) {
+      console.log("Initiating local Next.js direct backup to Firebase Firestore...");
+      await saveToFirestoreBackup(submissionFields);
+      return NextResponse.json({
+        success: true,
+        message: "Saved to Firebase successfully, but WordPress database sync was bypassed.",
+        warning: wpErrorMsg
+      });
     }
+
+    return NextResponse.json({ success: true });
   } catch (error) {
     console.error("API Route Error:", error);
     return NextResponse.json({ success: false, error: "Internal Server Error" }, { status: 500 });
   }
 }
+
 
