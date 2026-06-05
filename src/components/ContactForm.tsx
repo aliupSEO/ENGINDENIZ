@@ -1,6 +1,13 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
+
+declare global {
+  interface Window {
+    grecaptcha: any;
+    onRecaptchaLoad?: () => void;
+  }
+}
 
 interface FormField {
   id: string;
@@ -13,11 +20,17 @@ interface FormField {
 export default function ContactForm({ 
   formHtml, 
   fields, 
-  title 
+  title,
+  recaptchaEnabled,
+  recaptchaSiteKey,
+  recaptchaType
 }: { 
   formHtml?: string; 
   fields?: FormField[]; 
   title?: string; 
+  recaptchaEnabled?: boolean;
+  recaptchaSiteKey?: string;
+  recaptchaType?: string;
 }) {
   const [formData, setFormData] = useState({
     name: "",
@@ -28,7 +41,119 @@ export default function ContactForm({
 
   const [dynamicFormData, setDynamicFormData] = useState<Record<string, string>>({});
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState<string>("");
   const formRef = useRef<HTMLDivElement>(null);
+  
+  const recaptchaRef = useRef<HTMLDivElement>(null);
+  const renderedRef = useRef<HTMLDivElement | null>(null);
+  const [recaptchaWidgetId, setRecaptchaWidgetId] = useState<number | null>(null);
+
+  // Compile final fields list
+  let finalFields = fields ? [...fields] : [];
+  const hasRecaptcha = finalFields.some(f => f.type === "recaptcha");
+  if (recaptchaEnabled && !hasRecaptcha && recaptchaSiteKey) {
+    finalFields.push({
+      id: "recaptcha",
+      label: "reCAPTCHA",
+      type: "recaptcha",
+      required: true
+    });
+  }
+
+  // Load and render Google reCAPTCHA v2 Checkbox widget
+  useEffect(() => {
+    const requiresRecaptcha = finalFields.some(f => f.type === "recaptcha");
+    if (!requiresRecaptcha || !recaptchaSiteKey) return;
+
+    let isMounted = true;
+
+    const renderWidget = () => {
+      if (!recaptchaRef.current || !window.grecaptcha || !window.grecaptcha.render) return;
+      
+      // Prevent render conflict if DOM element is already rendered or contains iframe
+      if (
+        renderedRef.current === recaptchaRef.current || 
+        recaptchaRef.current.classList.contains("recaptcha-rendered") ||
+        recaptchaRef.current.querySelector("iframe")
+      ) {
+        return;
+      }
+
+      try {
+        const widgetId = window.grecaptcha.render(recaptchaRef.current, {
+          sitekey: recaptchaSiteKey,
+          callback: (token: string) => {
+            setDynamicFormData(prev => ({
+              ...prev,
+              "g-recaptcha-response": token
+            }));
+            setErrorMessage("");
+          },
+          "expired-callback": () => {
+            setDynamicFormData(prev => {
+              const updated = { ...prev };
+              delete updated["g-recaptcha-response"];
+              return updated;
+            });
+          },
+          "error-callback": () => {
+            setDynamicFormData(prev => {
+              const updated = { ...prev };
+              delete updated["g-recaptcha-response"];
+              return updated;
+            });
+            setErrorMessage("reCAPTCHA encountered an error. Please try reloading.");
+          }
+        });
+        
+        recaptchaRef.current.classList.add("recaptcha-rendered");
+        renderedRef.current = recaptchaRef.current;
+        if (isMounted) {
+          setRecaptchaWidgetId(widgetId);
+        }
+      } catch (err) {
+        console.error("Failed to render reCAPTCHA:", err);
+      }
+    };
+
+    if (window.grecaptcha && window.grecaptcha.render) {
+      const timer = setTimeout(renderWidget, 100);
+      return () => {
+        clearTimeout(timer);
+        isMounted = false;
+      };
+    } else {
+      window.onRecaptchaLoad = () => {
+        if (isMounted) renderWidget();
+      };
+
+      const scriptId = "google-recaptcha-script";
+      let script = document.getElementById(scriptId) as HTMLScriptElement;
+      if (!script) {
+        script = document.createElement("script");
+        script.id = scriptId;
+        script.src = "https://www.google.com/recaptcha/api.js?onload=onRecaptchaLoad&render=explicit";
+        script.async = true;
+        script.defer = true;
+        document.body.appendChild(script);
+      } else {
+        const interval = setInterval(() => {
+          if (window.grecaptcha && window.grecaptcha.render) {
+            clearInterval(interval);
+            if (isMounted) renderWidget();
+          }
+        }, 100);
+        return () => {
+          clearInterval(interval);
+          isMounted = false;
+        };
+      }
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, [finalFields, recaptchaSiteKey]);
 
   const handleInputChange = (fieldId: string, value: string) => {
     setDynamicFormData(prev => ({
@@ -40,6 +165,14 @@ export default function ContactForm({
   const handleDynamicFieldsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatus("loading");
+    setErrorMessage("");
+
+    const requiresRecaptcha = finalFields.some(f => f.type === "recaptcha");
+    if (requiresRecaptcha && !dynamicFormData["g-recaptcha-response"]) {
+      setErrorMessage("Please complete the reCAPTCHA verification.");
+      setStatus("error");
+      return;
+    }
     
     try {
       const response = await fetch("/api/contact", {
@@ -52,17 +185,25 @@ export default function ContactForm({
 
       if (response.ok) {
         setStatus("success");
+        setErrorMessage("");
+        
+        // Reset grecaptcha on successful submit
+        if (window.grecaptcha && recaptchaWidgetId !== null) {
+          window.grecaptcha.reset(recaptchaWidgetId);
+        }
+        
         // Clear inputs
         const cleared: Record<string, string> = {};
-        if (fields) {
-          fields.forEach(f => { cleared[f.id] = ""; });
-        }
+        finalFields.forEach(f => { cleared[f.id] = ""; });
         setDynamicFormData(cleared);
       } else {
+        const errorData = await response.json().catch(() => ({}));
+        setErrorMessage(errorData.error || errorData.message || "Something went wrong. Please check required fields and try again.");
         setStatus("error");
       }
     } catch (error) {
       console.error(error);
+      setErrorMessage("Connection error. Please try again.");
       setStatus("error");
     }
   };
@@ -70,6 +211,7 @@ export default function ContactForm({
   const handleDynamicSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatus("loading");
+    setErrorMessage("");
 
     const form = e.target as HTMLFormElement;
     const data = new FormData(form);
@@ -94,13 +236,16 @@ export default function ContactForm({
       const result = await response.json();
       if (result.success || result.insert_id) {
         setStatus("success");
+        setErrorMessage("");
         form.reset();
       } else {
         console.error(result.error);
+        setErrorMessage(result.error || "Something went wrong. Please check required fields and try again.");
         setStatus("error");
       }
     } catch (error) {
       console.error(error);
+      setErrorMessage("Connection error. Please try again.");
       setStatus("error");
     }
   };
@@ -108,6 +253,7 @@ export default function ContactForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatus("loading");
+    setErrorMessage("");
     
     try {
       const response = await fetch("/api/contact", {
@@ -126,23 +272,27 @@ export default function ContactForm({
 
       if (response.ok) {
         setStatus("success");
+        setErrorMessage("");
         setFormData({ name: "", adresse: "", plzOrt: "", email: "" });
       } else {
+        const errorData = await response.json().catch(() => ({}));
+        setErrorMessage(errorData.error || errorData.message || "Something went wrong. Please check required fields and try again.");
         setStatus("error");
       }
     } catch (error) {
       console.error(error);
+      setErrorMessage("Connection error. Please try again.");
       setStatus("error");
     }
   };
 
-  if (fields && fields.length > 0) {
-    const submitField = fields.find(f => f.type === "custom_submit");
+  if (finalFields && finalFields.length > 0) {
+    const submitField = finalFields.find(f => f.type === "custom_submit");
     const submitButtonText = submitField?.label || "Register";
 
     return (
       <form onSubmit={handleDynamicFieldsSubmit} className="flex flex-col space-y-4 font-sans w-full mb-8">
-        {fields.map((field) => {
+        {finalFields.map((field) => {
           const fid = field.id;
           const flabel = field.label;
           const ftype = field.type;
@@ -151,6 +301,19 @@ export default function ContactForm({
           
           if (ftype === "custom_submit") {
             return null;
+          }
+
+          if (ftype === "recaptcha") {
+            return (
+              <div key={fid} className="flex flex-col space-y-1 mb-2">
+                {flabel && (
+                  <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider pl-1 mb-1">
+                    {flabel} {frequired && <span className="text-red-500">*</span>}
+                  </label>
+                )}
+                <div ref={recaptchaRef} className="recaptcha-container mt-1" />
+              </div>
+            );
           }
           
           return (
@@ -181,7 +344,7 @@ export default function ContactForm({
             <p className="text-green-600 font-sans text-sm">Registration sent successfully!</p>
           )}
           {status === "error" && (
-            <p className="text-red-500 font-sans text-sm">Something went wrong. Please try again.</p>
+            <p className="text-red-500 font-sans text-sm">{errorMessage || "Something went wrong. Please check required fields and try again."}</p>
           )}
         </div>
       </form>
@@ -266,7 +429,7 @@ export default function ContactForm({
             <p className="text-green-600 font-sans text-sm">Registration sent successfully!</p>
           )}
           {status === "error" && (
-            <p className="text-red-500 font-sans text-sm">Something went wrong. Please check required fields and try again.</p>
+            <p className="text-red-500 font-sans text-sm">{errorMessage || "Something went wrong. Please check required fields and try again."}</p>
           )}
         </div>
       </div>
@@ -322,7 +485,7 @@ export default function ContactForm({
           <p className="text-green-600 font-sans text-sm">Registration sent successfully!</p>
         )}
         {status === "error" && (
-          <p className="text-red-500 font-sans text-sm">Something went wrong. Please try again.</p>
+          <p className="text-red-500 font-sans text-sm">{errorMessage || "Something went wrong. Please try again."}</p>
         )}
       </div>
     </form>

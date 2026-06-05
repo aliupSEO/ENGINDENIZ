@@ -129,6 +129,19 @@ export async function POST(request: Request) {
       } else {
         wpErrorMsg = wpData.message || "Failed WordPress REST API verification.";
         console.warn("WordPress REST API rejected the submission:", wpData);
+
+        // Bypasses Firebase fallback for client-side validation errors or reCAPTCHA failures
+        const isClientOrRecaptchaError = 
+          wpResponse.status === 400 || 
+          wpResponse.status === 403 ||
+          (wpData.code && typeof wpData.code === "string" && wpData.code.includes("recaptcha"));
+
+        if (isClientOrRecaptchaError) {
+          return NextResponse.json({ 
+            success: false, 
+            error: wpErrorMsg 
+          }, { status: wpResponse.status || 400 });
+        }
       }
     } catch (wpErr: any) {
       wpErrorMsg = wpErr.message || "WordPress server unreachable.";

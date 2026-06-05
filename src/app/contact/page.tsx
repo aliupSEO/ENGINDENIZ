@@ -96,6 +96,9 @@ export default async function ContactPage() {
               formHtml={fluentFormHtml} 
               fields={formFields} 
               title={formTitle} 
+              recaptchaEnabled={formSettings?.recaptcha_enabled}
+              recaptchaSiteKey={formSettings?.recaptcha_site_key}
+              recaptchaType={formSettings?.recaptcha_type}
             />
 
           </FadeIn>
